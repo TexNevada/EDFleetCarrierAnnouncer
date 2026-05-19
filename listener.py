@@ -7,16 +7,21 @@ Fleet Carrier Announcer – journal real-time tail.
 Events are emitted through the announce() sink → Discord webhook.
 """
 
+import logging
 import time
 from datetime import datetime
 from typing import Optional
 
 import requests
 
+from config import appname
+
 from carrier_state import CarrierRegistry
 from fc_config import WATCHED_CARRIERS, save_carriers
 from event_cache import EventCache
 from journal_parser import JournalTailer, refresh_from_journal
+
+logger = logging.getLogger(f"{appname}.EDFCA")
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -55,6 +60,18 @@ _EVENT_COLORS = {
 # Will be set in main() so announce() can persist state.
 _registry: Optional[CarrierRegistry] = None
 _cache: Optional[EventCache] = None
+
+
+def refresh_carriers(carriers: list[dict]) -> None:
+    """Update the running registry from a fresh carriers list.
+
+    Called by load.py when the EDFCA settings tab is saved.  No-op when
+    invoked before main_loop has built the registry.
+    """
+    if _registry is None:
+        return
+    _registry.replace_contents(carriers)
+    logger.info("Refreshed carriers: %s", _registry.callsigns)
 
 
 def _to_discord_timestamp(iso_str: str) -> str:
@@ -153,11 +170,21 @@ def announce(payload: dict) -> None:
     """
     # ── dedup check ──────────────────────────────────────────────────
     if _cache is not None and _cache.is_duplicate(payload):
-        print(f"[cache] Skipping duplicate: {payload.get('callsign')} "
-              f"{payload.get('event_type')} @ {payload.get('current_location')}")
+        logger.debug(
+            "Skipping duplicate: %s %s @ %s",
+            payload.get("callsign"),
+            payload.get("event_type"),
+            payload.get("current_location"),
+        )
         return
 
-    print(payload)
+    logger.info(
+        "Announcing %s for %s @ %s",
+        payload.get("event_type"),
+        payload.get("callsign"),
+        payload.get("current_location"),
+    )
+    logger.debug("Full payload: %s", payload)
 
     # ── persist location to carriers.json ────────────────────────────
     if _registry is not None and payload.get("current_location"):
@@ -172,9 +199,13 @@ def announce(payload: dict) -> None:
         try:
             resp = requests.post(webhook_url, json=body, timeout=10)
             if resp.status_code >= 400:
-                print(f"[discord] Webhook error {resp.status_code}: {resp.text}")
+                logger.error(
+                    "Discord webhook error %d for %s: %s",
+                    resp.status_code, payload.get("callsign"), resp.text,
+                )
         except requests.RequestException as exc:
-            print(f"[discord] Webhook request failed: {exc}")
+            logger.error("Discord webhook request failed for %s: %s",
+                         payload.get("callsign"), exc)
 
     # ── record in cache ──────────────────────────────────────────────
     if _cache is not None:
@@ -204,7 +235,7 @@ def main_loop(stop_event=None, journal_dir: Optional[str] = None) -> None:
     # 1. Build the registry of carriers we care about.
     registry = CarrierRegistry(WATCHED_CARRIERS)
     _registry = registry
-    print(f"[startup] Tracking carriers: {registry.callsigns}")
+    logger.info("Tracking carriers: %s", registry.callsigns)
 
     # 2. Load the event cache (prevents re-posting on restart).
     cache = EventCache()
@@ -217,7 +248,7 @@ def main_loop(stop_event=None, journal_dir: Optional[str] = None) -> None:
     for p in journal_payloads:
         announce(p)
 
-    print(f"[startup] Carrier states after journal refresh: {registry}")
+    logger.debug("Carrier states after journal refresh: %s", registry)
 
     # 4. Set up the journal tailer (picks up where startup left off).
     tailer = JournalTailer(
@@ -226,7 +257,7 @@ def main_loop(stop_event=None, journal_dir: Optional[str] = None) -> None:
         start_path=journal_path,
         start_offset=journal_offset,
     )
-    print("[journal] Real-time tailer ready — polling for carrier events …")
+    logger.info("Real-time tailer ready — polling for carrier events")
 
     # 5. Poll the journal file for new lines.
     while not (stop_event and stop_event.is_set()):
@@ -238,7 +269,7 @@ def main_loop(stop_event=None, journal_dir: Optional[str] = None) -> None:
 
         time.sleep(1)
 
-    print("[shutdown] Fleet Carrier Announcer stopped.")
+    logger.info("Fleet Carrier Announcer stopped")
 
 
 def main() -> None:

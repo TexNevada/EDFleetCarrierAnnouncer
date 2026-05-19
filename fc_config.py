@@ -7,7 +7,12 @@ human-readable name.
 """
 
 import json
+import logging
 import os
+
+from config import appname
+
+logger = logging.getLogger(f"{appname}.EDFCA")
 
 _CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
 CARRIERS_FILE = os.path.join(_CONFIG_DIR, "carriers.json")
@@ -16,7 +21,7 @@ CARRIERS_FILE = os.path.join(_CONFIG_DIR, "carriers.json")
 def _load_carriers() -> list[dict]:
     """Load the carrier list from carriers.json."""
     if not os.path.exists(CARRIERS_FILE):
-        print(f"[config] WARNING: {CARRIERS_FILE} not found – no carriers will be tracked")
+        logger.warning("%s not found – no carriers will be tracked", CARRIERS_FILE)
         return []
     with open(CARRIERS_FILE, "r", encoding="utf-8") as fh:
         data = json.load(fh)

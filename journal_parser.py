@@ -17,10 +17,15 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
 import os
 from typing import Optional
 
+from config import appname
+
 from carrier_state import CarrierRegistry
+
+logger = logging.getLogger(f"{appname}.EDFCA")
 
 
 
@@ -208,10 +213,10 @@ def refresh_from_journal(registry: CarrierRegistry, journal_dir: str) -> tuple[l
     """
     path = _newest_journal(journal_dir)
     if path is None:
-        print(f"[journal] No journal files found in {journal_dir}")
+        logger.warning("No journal files found in %s", journal_dir)
         return [], [], None, 0
 
-    print(f"[journal] Reading {os.path.basename(path)}")
+    logger.info("Reading %s", os.path.basename(path))
     payloads: list[dict] = []
     raw_entries: list[dict] = []
 
@@ -265,7 +270,7 @@ class JournalTailer:
 
             if newest != self._current_path:
                 if self._current_path is not None:
-                    print(f"[journal] New journal detected: {os.path.basename(newest)}")
+                    logger.info("New journal detected: %s", os.path.basename(newest))
                 self._current_path = newest
                 self._offset = 0
 
@@ -280,8 +285,8 @@ class JournalTailer:
                 if payload is not None or raw is not None:
                     results.append((payload, raw))
 
-        except Exception as exc:
-            print(f"[journal] Tailer error: {exc}")
+        except Exception:
+            logger.exception("Tailer error")
 
         return results
 

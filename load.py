@@ -27,7 +27,7 @@ if _plugin_dir not in sys.path:
 from fc_config import _load_carriers, save_carriers, reload_carriers
 
 # EDMC's config module is the source of truth for the journal directory.
-from config import config
+from config import appname, config
 
 # Try to import EDMC's notebook module for proper settings tab styling.
 try:
@@ -39,10 +39,12 @@ except ImportError:
 # to EDMC's auto-detected default when the user hasn't overridden it.
 JOURNAL_DIR: str = config.get_str("journaldir") or config.default_journal_dir
 
-logger = logging.getLogger(__name__)
-
 # Plugin metadata — this becomes the tab name in EDMC Settings.
 plugin_name = "EDFCA"
+
+# Logger sits under EDMC's appname so records flow to its log file.
+# Sibling modules use the same name so all EDFCA records share one stream.
+logger = logging.getLogger(f"{appname}.{plugin_name}")
 
 _worker_thread: Optional[threading.Thread] = None
 _stop_event = threading.Event()
@@ -176,7 +178,11 @@ def prefs_changed(cmdr: str, is_beta: bool) -> None:
             carriers_out.append(entry)
 
         save_carriers(carriers_out)
-        reload_carriers()
+        reloaded = reload_carriers()
+        # Push the new list into the running registry so the live plugin
+        # picks up adds/removes/edits without an EDMC restart.
+        from listener import refresh_carriers
+        refresh_carriers(reloaded)
         logger.info(f"[EDFCA] Saved {len(carriers_out)} carrier(s) to carriers.json")
 
     except Exception:

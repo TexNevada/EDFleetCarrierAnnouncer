@@ -11,8 +11,13 @@ The log is pruned of entries older than CACHE_TTL on load.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
+
+from config import appname
+
+logger = logging.getLogger(f"{appname}.EDFCA")
 
 _CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(_CONFIG_DIR, "event_log.log")
@@ -83,7 +88,7 @@ class EventCache:
             with open(self._path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(event, separators=(",", ":")) + "\n")
         except OSError as exc:
-            print(f"[log] Failed to write: {exc}")
+            logger.warning("Failed to write raw event to %s: %s", self._path, exc)
 
     def is_duplicate(self, payload: dict) -> bool:
         """Return True if this payload has already been announced."""
@@ -96,14 +101,14 @@ class EventCache:
             with open(self._path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
         except OSError as exc:
-            print(f"[log] Failed to write: {exc}")
+            logger.warning("Failed to write announced payload to %s: %s", self._path, exc)
 
     # ── internal ─────────────────────────────────────────────────────────
 
     def _load(self) -> None:
         """Replay the log file to rebuild the dedup set, pruning old entries."""
         if not os.path.exists(self._path):
-            print("[log] No existing log file — starting fresh")
+            logger.info("No existing event log — starting fresh")
             return
 
         now = datetime.now(timezone.utc).timestamp()
@@ -139,6 +144,6 @@ class EventCache:
                 for ln in kept_lines:
                     fh.write(ln + "\n")
         except OSError as exc:
-            print(f"[log] Failed to prune log: {exc}")
+            logger.warning("Failed to prune event log: %s", exc)
 
-        print(f"[log] Loaded {count} announced event(s) from {os.path.basename(self._path)}")
+        logger.info("Loaded %d announced event(s) from %s", count, os.path.basename(self._path))
