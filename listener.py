@@ -7,21 +7,17 @@ Fleet Carrier Announcer – journal real-time tail.
 Events are emitted through the announce() sink → Discord webhook.
 """
 
-import logging
 import time
 from datetime import datetime
 from typing import Optional
 
 import requests
 
-from config import appname
-
+from _logger import logger
 from carrier_state import CarrierRegistry
 from fc_config import WATCHED_CARRIERS, save_carriers
 from event_cache import EventCache
 from journal_parser import JournalTailer, refresh_from_journal
-
-logger = logging.getLogger(f"{appname}.EDFCA")
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────

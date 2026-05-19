@@ -17,15 +17,11 @@ from __future__ import annotations
 
 import glob
 import json
-import logging
 import os
 from typing import Optional
 
-from config import appname
-
+from _logger import logger
 from carrier_state import CarrierRegistry
-
-logger = logging.getLogger(f"{appname}.EDFCA")
 
 
 

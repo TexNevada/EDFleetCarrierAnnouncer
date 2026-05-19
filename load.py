@@ -10,13 +10,13 @@ acts as the host process.
 The EDFCA tab in EDMC Settings allows editing carriers.json fields.
 """
 
-import logging
 import os
 import sys
 import threading
-from typing import Optional
+from typing import Any, Optional
 
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
 
 # Ensure the plugin directory is on sys.path so sibling modules resolve.
@@ -27,7 +27,7 @@ if _plugin_dir not in sys.path:
 from fc_config import _load_carriers, save_carriers, reload_carriers
 
 # EDMC's config module is the source of truth for the journal directory.
-from config import appname, config
+from config import config
 
 # Try to import EDMC's notebook module for proper settings tab styling.
 try:
@@ -35,16 +35,21 @@ try:
 except ImportError:
     nb = None
 
+# EDMC's theme module — applies the user-selected (default/dark/transparent)
+# colour scheme to our widgets.  Optional so the plugin still loads outside EDMC.
+try:
+    from theme import theme
+except ImportError:
+    theme = None
+
 # Path to the Elite Dangerous journal folder, sourced from EDMC.  Falls back
 # to EDMC's auto-detected default when the user hasn't overridden it.
 JOURNAL_DIR: str = config.get_str("journaldir") or config.default_journal_dir
 
+from _logger import logger
+
 # Plugin metadata — this becomes the tab name in EDMC Settings.
 plugin_name = "EDFCA"
-
-# Logger sits under EDMC's appname so records flow to its log file.
-# Sibling modules use the same name so all EDFCA records share one stream.
-logger = logging.getLogger(f"{appname}.{plugin_name}")
 
 _worker_thread: Optional[threading.Thread] = None
 _stop_event = threading.Event()
@@ -61,6 +66,11 @@ _EDITABLE_FIELDS = [
 # Holds the list of carrier row widgets while the prefs window is open.
 _carrier_rows: list[dict] = []
 _rows_frame: Optional[tk.Frame] = None
+
+# Main-window widgets (the "EDFCA: running" panel and per-carrier location rows).
+_main_frame: Optional[tk.Frame] = None
+_fc_location_rows: dict[str, dict[str, Any]] = {}
+_REFRESH_MS = 2000
 
 
 # ── EDMC lifecycle ───────────────────────────────────────────────────────────
@@ -88,9 +98,128 @@ def plugin_stop() -> None:
         _worker_thread.join(timeout=5)
 
 
-def plugin_app(parent: tk.Frame) -> tk.Label:
-    """Optional: show a small label in the EDMC main window."""
-    return tk.Label(parent, text="EDFCA: running")
+def plugin_app(parent: tk.Frame) -> tk.Frame:
+    """Build the EDMC main-window panel.
+
+    Shows the plugin status header plus, per watched carrier, the carrier's
+    last known system in a readonly Entry so it can be selected and copied
+    with Ctrl+C.
+    """
+    global _main_frame
+    frame = tk.Frame(parent)
+    frame.columnconfigure(0, weight=1)
+
+    tk.Label(frame, text="EDFCA: running").grid(row=0, column=0, sticky="w")
+
+    _main_frame = frame
+    _rebuild_fc_location_rows()
+    frame.after(_REFRESH_MS, _refresh_fc_locations)
+    _apply_theme()
+    return frame
+
+
+def _rebuild_fc_location_rows() -> None:
+    """(Re)build one location row per watched carrier under the main header."""
+    global _fc_location_rows
+    if _main_frame is None:
+        return
+
+    for row in _fc_location_rows.values():
+        row["row"].destroy()
+    _fc_location_rows = {}
+
+    carriers = _load_carriers()
+    multiple = len(carriers) > 1
+    for i, c in enumerate(carriers, start=1):
+        cs = (c.get("callsign") or "").strip().upper()
+        if not cs:
+            continue
+        label_text = f"FC System ({cs}):" if multiple else "FC System:"
+
+        row_frame = tk.Frame(_main_frame)
+        row_frame.grid(row=i, column=0, sticky="ew", pady=(2, 0))
+        row_frame.columnconfigure(1, weight=1)
+
+        tk.Label(row_frame, text=label_text).grid(row=0, column=0, sticky="w")
+        var = tk.StringVar(value=c.get("last_known_location") or "—")
+        # A plain Label themes correctly under every EDMC theme — unlike a
+        # readonly Entry, whose ``readonlybackground`` EDMC's theme module
+        # does not manage.  Click-to-copy gives one-action copy UX.
+        value_label = tk.Label(
+            row_frame, textvariable=var, cursor="hand2", anchor="w",
+        )
+        value_label.grid(row=0, column=1, sticky="ew", padx=(5, 0))
+        value_label.bind("<Button-1>", _on_location_click)
+
+        # Hover underline — derive both fonts from the label's current font
+        # so we inherit family/size from whatever EDMC is using.
+        normal_font = tkfont.Font(font=value_label.cget("font"))
+        underlined_font = tkfont.Font(font=value_label.cget("font"))
+        underlined_font.configure(underline=True)
+        value_label.configure(font=normal_font)
+        value_label.bind(
+            "<Enter>",
+            lambda e, f=underlined_font: e.widget.configure(font=f),
+        )
+        value_label.bind(
+            "<Leave>",
+            lambda e, f=normal_font: e.widget.configure(font=f),
+        )
+
+        _fc_location_rows[cs] = {
+            "row": row_frame, "var": var, "label": value_label,
+            # Keep Font references alive — Tk drops named fonts when their
+            # last Python reference is collected.
+            "fonts": (normal_font, underlined_font),
+        }
+
+    _apply_theme()
+
+
+def _on_location_click(event) -> None:
+    """Copy the clicked location to the clipboard."""
+    widget = event.widget
+    text = widget.cget("text")
+    if not text or text == "—":
+        return
+    try:
+        widget.clipboard_clear()
+        widget.clipboard_append(text)
+        widget.update()  # flush so other apps see the clipboard contents
+        logger.info("Copied location to clipboard: %s", text)
+    except tk.TclError:
+        logger.exception("Failed to copy to clipboard")
+
+
+def _apply_theme() -> None:
+    """Apply EDMC's current theme to the main-window frame and its children."""
+    if _main_frame is None or not _main_frame.winfo_exists():
+        return
+    if theme is not None:
+        try:
+            theme.update(_main_frame)
+        except Exception:
+            logger.exception("theme.update failed")
+
+
+def _refresh_fc_locations() -> None:
+    """Poll the running registry and update each FC System field.
+    Reschedules itself on the Tk main thread."""
+    if _main_frame is None or not _main_frame.winfo_exists():
+        return
+    try:
+        import listener
+        if listener._registry is not None:
+            for cs, row in _fc_location_rows.items():
+                state = listener._registry.get(cs)
+                if state is None:
+                    continue
+                loc = state.current_location or "—"
+                if row["var"].get() != loc:
+                    row["var"].set(loc)
+    except Exception:
+        logger.exception("Failed to refresh FC location display")
+    _main_frame.after(_REFRESH_MS, _refresh_fc_locations)
 
 
 # ── EDFCA settings tab ──────────────────────────────────────────────────────
@@ -105,12 +234,10 @@ def plugin_prefs(parent, cmdr: str, is_beta: bool):
     try:
         _carrier_rows = []
 
-        # Use EDMC's nb.Frame if available, else fall back to tk.Frame.
         FrameClass = nb.Frame if nb else tk.Frame
         frame = FrameClass(parent)
         frame.columnconfigure(0, weight=1)
 
-        # Title
         tk.Label(
             frame, text="Fleet Carrier Announcer — Carriers",
             font=("", 10, "bold"),
@@ -183,6 +310,8 @@ def prefs_changed(cmdr: str, is_beta: bool) -> None:
         # picks up adds/removes/edits without an EDMC restart.
         from listener import refresh_carriers
         refresh_carriers(reloaded)
+        # Rebuild the main-window location rows so adds/removes appear there too.
+        _rebuild_fc_location_rows()
         logger.info(f"[EDFCA] Saved {len(carriers_out)} carrier(s) to carriers.json")
 
     except Exception:

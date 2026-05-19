@@ -11,13 +11,10 @@ The log is pruned of entries older than CACHE_TTL on load.
 from __future__ import annotations
 
 import json
-import logging
 import os
 from datetime import datetime, timezone
 
-from config import appname
-
-logger = logging.getLogger(f"{appname}.EDFCA")
+from _logger import logger
 
 _CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(_CONFIG_DIR, "event_log.log")

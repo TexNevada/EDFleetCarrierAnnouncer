@@ -7,12 +7,9 @@ human-readable name.
 """
 
 import json
-import logging
 import os
 
-from config import appname
-
-logger = logging.getLogger(f"{appname}.EDFCA")
+from _logger import logger
 
 _CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
 CARRIERS_FILE = os.path.join(_CONFIG_DIR, "carriers.json")
