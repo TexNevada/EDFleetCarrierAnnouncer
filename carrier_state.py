@@ -257,6 +257,45 @@ class CarrierRegistry:
             result.append(entry)
         return result
 
+    def replace_contents(self, carriers: list[dict]) -> None:
+        """
+        Rebuild the registry from a fresh carriers list — used when the
+        EDFCA settings tab is saved so changes apply without restarting EDMC.
+
+        In-memory jump state (``jumping``, ``destination``, and a
+        ``current_location`` that's newer than the saved one) is preserved
+        for callsigns that survive the edit.
+        """
+        new_carriers: dict[str, CarrierState] = {}
+        new_id_map: dict[int, str] = {}
+        for entry in carriers:
+            cs = entry["callsign"].upper()
+            raw_id = entry.get("CarrierID") or entry.get("carrier_id")
+            carrier_id = int(raw_id) if raw_id is not None else None
+            state = CarrierState(
+                callsign=cs,
+                name=entry.get("name"),
+                carrier_id=carrier_id,
+                discord_webhook=entry.get("discord_webhook"),
+                logo_url=entry.get("logo_url"),
+                current_location=entry.get("last_known_location"),
+            )
+            old = self._carriers.get(cs)
+            if old is not None:
+                state.jumping = old.jumping
+                state.destination = old.destination
+                if old.current_location and not state.current_location:
+                    state.current_location = old.current_location
+            new_carriers[cs] = state
+            if carrier_id is not None:
+                new_id_map[carrier_id] = cs
+
+        # Reference reassignment is atomic in CPython — the listener thread
+        # may observe a brief mismatch between the two maps, but won't crash.
+        self._raw_config = carriers
+        self._carriers = new_carriers
+        self._id_to_callsign = new_id_map
+
     def __repr__(self) -> str:
         return f"CarrierRegistry({list(self._carriers.values())})"
 
