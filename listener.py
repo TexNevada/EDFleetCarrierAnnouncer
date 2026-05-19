@@ -183,7 +183,7 @@ def announce(payload: dict) -> None:
 
 # ── main ─────────────────────────────────────────────────────────────────────
 
-def main_loop(stop_event=None) -> None:
+def main_loop(stop_event=None, journal_dir: Optional[str] = None) -> None:
     """
     Core announcer loop.
 
@@ -192,7 +192,13 @@ def main_loop(stop_event=None) -> None:
     stop_event : threading.Event, optional
         When set, the loop exits gracefully.  If *None* the loop runs
         until the process is killed (standalone mode).
+    journal_dir : str
+        Path to the Elite Dangerous journal folder.  Required — the EDMC
+        plugin entry point (load.py) sources this from EDMC's config.
     """
+    if not journal_dir:
+        raise ValueError("main_loop requires a journal_dir (provided by EDMC via load.py)")
+
     global _registry, _cache
 
     # 1. Build the registry of carriers we care about.
@@ -205,7 +211,7 @@ def main_loop(stop_event=None) -> None:
     _cache = cache
 
     # 3. Seed state from the newest journal file (read-only).
-    journal_payloads, journal_raws, journal_path, journal_offset = refresh_from_journal(registry)
+    journal_payloads, journal_raws, journal_path, journal_offset = refresh_from_journal(registry, journal_dir)
     for raw in journal_raws:
         cache.log_raw(raw)
     for p in journal_payloads:
@@ -216,6 +222,7 @@ def main_loop(stop_event=None) -> None:
     # 4. Set up the journal tailer (picks up where startup left off).
     tailer = JournalTailer(
         registry=registry,
+        journal_dir=journal_dir,
         start_path=journal_path,
         start_offset=journal_offset,
     )

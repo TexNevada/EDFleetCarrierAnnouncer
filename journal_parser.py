@@ -21,7 +21,6 @@ import os
 from typing import Optional
 
 from carrier_state import CarrierRegistry
-from fc_config import JOURNAL_DIR
 
 
 
@@ -196,7 +195,7 @@ def _process_line(
 
 # ── startup refresh ──────────────────────────────────────────────────────────
 
-def refresh_from_journal(registry: CarrierRegistry) -> tuple[list[dict], list[dict], Optional[str], int]:
+def refresh_from_journal(registry: CarrierRegistry, journal_dir: str) -> tuple[list[dict], list[dict], Optional[str], int]:
     """
     Open the newest journal file (read-only) and replay carrier-relevant
     events into *registry*.
@@ -207,9 +206,9 @@ def refresh_from_journal(registry: CarrierRegistry) -> tuple[list[dict], list[di
         path         – full path of the journal file that was read (or None).
         offset       – file position after the last line read (byte offset).
     """
-    path = _newest_journal(JOURNAL_DIR)
+    path = _newest_journal(journal_dir)
     if path is None:
-        print(f"[journal] No journal files found in {JOURNAL_DIR}")
+        print(f"[journal] No journal files found in {journal_dir}")
         return [], [], None, 0
 
     print(f"[journal] Reading {os.path.basename(path)}")
@@ -242,7 +241,7 @@ class JournalTailer:
     def __init__(
         self,
         registry: CarrierRegistry,
-        journal_dir: str = JOURNAL_DIR,
+        journal_dir: str,
         start_path: Optional[str] = None,
         start_offset: int = 0,
     ) -> None:

@@ -26,11 +26,18 @@ if _plugin_dir not in sys.path:
 
 from fc_config import _load_carriers, save_carriers, reload_carriers
 
+# EDMC's config module is the source of truth for the journal directory.
+from config import config
+
 # Try to import EDMC's notebook module for proper settings tab styling.
 try:
     import myNotebook as nb
 except ImportError:
     nb = None
+
+# Path to the Elite Dangerous journal folder, sourced from EDMC.  Falls back
+# to EDMC's auto-detected default when the user hasn't overridden it.
+JOURNAL_DIR: str = config.get_str("journaldir") or config.default_journal_dir
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +235,7 @@ def _run_announcer() -> None:
     """Entry point for the background thread — runs the journal tailer loop."""
     from listener import main_loop
     try:
-        main_loop(_stop_event)
+        main_loop(_stop_event, journal_dir=JOURNAL_DIR)
     except Exception:
         logger.exception("Fleet Carrier Announcer crashed")
 

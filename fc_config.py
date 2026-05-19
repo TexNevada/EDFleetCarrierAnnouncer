@@ -40,9 +40,3 @@ def reload_carriers() -> list[dict]:
 
 # Loaded once at import time.
 WATCHED_CARRIERS: list[dict] = _load_carriers()
-
-# Path to the Elite Dangerous journal folder (read at startup + tailed in real time)
-# Windows
-#JOURNAL_DIR = r"C:\Users\Tex\Saved Games\Frontier Developments\Elite Dangerous"
-# TODO: Use journal from E:D Market connector
-JOURNAL_DIR = r"~/drives/VitaminD/SteamLibrary/steamapps/compatdata/359320/pfx/drive_c/users/steamuser/Saved Games/Frontier Developments/Elite Dangerous"

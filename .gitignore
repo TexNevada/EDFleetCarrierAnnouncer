@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local carrier config — contains Discord webhook URLs, never commit.
+carriers.json
