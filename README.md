@@ -8,6 +8,23 @@ or cancels a jump.
 Per-carrier webhooks are supported, so different carriers can announce to
 different Discord channels.
 
+## Contents
+
+- [Events announced](#events-announced)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+  - [1. Locate your EDMC plugins folder](#1-locate-your-edmc-plugins-folder)
+  - [2. Clone this repo into that folder](#2-clone-this-repo-into-that-folder)
+  - [2.5 Linux extra step](#25-linux-extra-step)
+  - [3. Restart EDMC](#3-restart-edmc)
+  - [EDFCA uses EDMC to know where your journal files live](#edfca-uses-edmc-to-know-where-your-journal-files-live)
+  - [Finding your Carrier ID](#finding-your-carrier-id)
+  - [Add a carrier via the EDFCA settings tab](#add-a-carrier-via-the-edfca-settings-tab)
+  - [Or edit `carriers.json` directly](#or-edit-carriersjson-directly)
+- [How it works](#how-it-works)
+- [Files](#files)
+- [Troubleshooting](#troubleshooting)
+
 ## Events announced
 
 | `event_type`              | Meaning                                              |
@@ -27,8 +44,8 @@ will not re-post events that were already announced.
   must be written to disk; this includes the Linux + Proton/Wine setup).
 - [EDMarketConnector](https://github.com/EDCD/EDMarketConnector/releases)
   installed and running.
-- Python `requests` library (EDMC's bundled Python on Windows already has
-  it; on Linux installs see [Linux setup](#linux-extra-step) below).
+- **Linux users:** Python `requests` library (EDMC's bundled Python on Windows already has
+  it; on Linux installs see [Linux extra step](#25-linux-extra-step) below).
 - A Discord channel + webhook URL for each carrier you want to announce.
 
 ## Installation
@@ -74,11 +91,67 @@ On Linux/Proton this path might not be automatically set. If you haven't set the
 **File → Settings → Configuration → "E:D journal file location"**
 → point it at the folder containing `Journal.*.log` files.
 
-For Steam Proton this usually looks like:
+On Windows the default is:
 
 ```
-~/.local/share/Steam/steamapps/compatdata/359320/pfx/drive_c/users/steamuser/Saved Games/Frontier Developments/Elite Dangerous
+%USERPROFILE%\Saved Games\Frontier Developments\Elite Dangerous
 ```
+
+On Linux the journal lives inside the Proton prefix (app ID `359320`).
+Default locations, depending on how Steam is installed:
+
+| Steam install    | Path                                                                                                                                |
+|------------------|-------------------------------------------------------------------------------------------------------------------------------------|
+| Standard Steam   | `~/.local/share/Steam/steamapps/compatdata/359320/pfx/drive_c/users/steamuser/Saved Games/Frontier Developments/Elite Dangerous/`      |
+| Symlink variant  | `~/.steam/steam/steamapps/compatdata/359320/pfx/drive_c/users/steamuser/Saved Games/Frontier Developments/Elite Dangerous/`            |
+| Flatpak Steam    | `~/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/compatdata/359320/pfx/drive_c/users/steamuser/Saved Games/Frontier Developments/Elite Dangerous/` |
+
+If you installed Elite Dangerous to an additional Steam library folder (a
+second drive, for example), `compatdata` lives under that library instead —
+the tail of the path (`compatdata/359320/pfx/...`) is the same, only the
+Steam root differs. Non-Steam Wine/Lutris setups put it under whatever
+prefix you configured.
+
+To locate it if none of the above match:
+
+```bash
+find / -type d -name "Elite Dangerous" -path "*Frontier Developments*" 2>/dev/null
+```
+
+### Finding your Carrier ID
+
+Your `CarrierID` is not shown anywhere in the game UI — it lives in the
+journal files Elite Dangerous writes to your own PC, in the same folder you
+pointed EDMC at above (`Journal.*.log`).
+
+The game writes a `CarrierStats` event every time you open the carrier
+management screen, so the quickest way to generate a fresh one is: log in,
+open **Carrier Management**, then look at the newest `Journal.*.log` file.
+Each journal line is a single JSON object; the one you want looks like this
+(trimmed):
+
+```json
+{ "timestamp":"2026-09-06T15:49:35Z", "event":"CarrierStats", "CarrierID":3711951104, "CarrierType":"FleetCarrier", "Callsign":"N3M-BKZ", "Name":"THE HYPERION", ... }
+```
+
+Here the Carrier ID is `3711951104` and the callsign is `N3M-BKZ` — both of
+which go into the EDFCA settings tab.
+
+To find it without scrolling through the file:
+
+```bash
+# Linux / macOS
+grep -h CarrierStats "$JOURNAL_DIR"/Journal.*.log | tail -1
+```
+
+```powershell
+# Windows (PowerShell) — default journal folder
+Select-String -Path "$env:USERPROFILE\Saved Games\Frontier Developments\Elite Dangerous\Journal.*.log" -Pattern CarrierStats | Select-Object -Last 1
+```
+
+`CarrierID` also appears in the `CarrierJumpRequest`, `CarrierJump`,
+`CarrierJumpCancelled` and `CarrierLocation` events, so any of those lines
+will do if you don't have a `CarrierStats` line handy.
 
 ### Add a carrier via the EDFCA settings tab
 
@@ -89,7 +162,7 @@ For Steam Proton this usually looks like:
    | Field           | Required          | Notes                                                                                                       |
    |-----------------|-------------------|-------------------------------------------------------------------------------------------------------------|
    | Callsign        | ✓                 | Your carrier ID, e.g. `N3M-BKZ`. Rows without a callsign are dropped when you click OK.                     |
-   | Carrier ID      | Recommended       | `CarrierID` from the journal — needed for events that omit the callsign (some `CarrierJumpCancelled` etc.). |
+   | Carrier ID      | Recommended       | `CarrierID` from the journal (see [Finding your Carrier ID](#finding-your-carrier-id)) — needed for events that omit the callsign (some `CarrierJumpCancelled` etc.). |
    | Name            | Optional          | Free-text display name.                                                                                     |
    | Discord Webhook | For announcements | Full webhook URL. If blank, the carrier is tracked silently — nothing is posted to Discord.                 |
    | Logo URL        | Optional          | Image URL — shown as the embed thumbnail.                                                                   |
