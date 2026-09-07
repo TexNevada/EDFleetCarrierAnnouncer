@@ -35,6 +35,20 @@ try:
 except ImportError:
     nb = None
 
+# EDMC's settings window is built entirely from ttk widgets (myNotebook's
+# nb.* classes).  Classic tk widgets do not follow ttk's colour scheme, so
+# every widget in our tab is created from these aliases instead.  Falling back
+# to plain ttk keeps things sane on older EDMC releases / outside EDMC.
+_Label = getattr(nb, "Label", None) or ttk.Label
+_Entry = getattr(nb, "EntryMenu", None) or getattr(nb, "Entry", None) or ttk.Entry
+_Button = getattr(nb, "Button", None) or ttk.Button
+
+# Padding constants mirroring EDMC's own prefs.py, so our tab lines up with
+# the rest of the settings window.
+_PADX = 10
+_PADY = 1
+_BOXY = 2
+
 # EDMC's theme module — applies the user-selected (default/dark/transparent)
 # colour scheme to our widgets.  Optional so the plugin still loads outside EDMC.
 try:
@@ -65,7 +79,12 @@ _EDITABLE_FIELDS = [
 
 # Holds the list of carrier row widgets while the prefs window is open.
 _carrier_rows: list[dict] = []
-_rows_frame: Optional[tk.Frame] = None
+_rows_frame: Optional[ttk.Frame] = None
+
+# ttk styles/fonts for the settings tab, created lazily once a root window exists.
+_styles_ready = False
+_remove_btn_style = ""
+_heading_font: Optional[tkfont.Font] = None
 
 # Main-window widgets (the "EDFCA: running" panel and per-carrier location rows).
 _main_frame: Optional[tk.Frame] = None
@@ -151,29 +170,38 @@ def _rebuild_fc_location_rows() -> None:
         value_label.grid(row=0, column=1, sticky="ew", padx=(5, 0))
         value_label.bind("<Button-1>", _on_location_click)
 
-        # Hover underline — derive both fonts from the label's current font
-        # so we inherit family/size from whatever EDMC is using.
-        normal_font = tkfont.Font(font=value_label.cget("font"))
-        underlined_font = tkfont.Font(font=value_label.cget("font"))
-        underlined_font.configure(underline=True)
-        value_label.configure(font=normal_font)
-        value_label.bind(
-            "<Enter>",
-            lambda e, f=underlined_font: e.widget.configure(font=f),
-        )
-        value_label.bind(
-            "<Leave>",
-            lambda e, f=normal_font: e.widget.configure(font=f),
-        )
+        # Hover underline.  The normal font is deliberately left unset so
+        # EDMC's theme module owns it (the dark/transparent themes switch to
+        # Euro Caps); the underlined variant is derived at hover time from
+        # whatever font is live then.
+        value_label.bind("<Enter>", lambda e, c=cs: _set_location_hover(c, True))
+        value_label.bind("<Leave>", lambda e, c=cs: _set_location_hover(c, False))
 
         _fc_location_rows[cs] = {
             "row": row_frame, "var": var, "label": value_label,
-            # Keep Font references alive — Tk drops named fonts when their
-            # last Python reference is collected.
-            "fonts": (normal_font, underlined_font),
         }
 
     _apply_theme()
+
+
+def _set_location_hover(callsign: str, hovering: bool) -> None:
+    """Underline a location label while the pointer is over it."""
+    row = _fc_location_rows.get(callsign)
+    if row is None or not row["label"].winfo_exists():
+        return
+
+    label = row["label"]
+    if hovering:
+        base = label.cget("font")
+        underlined = tkfont.Font(font=base)
+        underlined.configure(underline=True)
+        # Keep both alive — Tk drops named fonts when their last Python
+        # reference is collected.
+        row["base_font"] = base
+        row["hover_font"] = underlined
+        label.configure(font=underlined)
+    else:
+        label.configure(font=row.get("base_font") or "")
 
 
 def _on_location_click(event) -> None:
@@ -192,14 +220,34 @@ def _on_location_click(event) -> None:
 
 
 def _apply_theme() -> None:
-    """Apply EDMC's current theme to the main-window frame and its children."""
+    """Apply EDMC's current theme to the main-window frame and its children.
+
+    EDMC only walks the whole widget tree once, at startup.  Widgets we build
+    later (when the carrier list changes) have to be themed by hand, otherwise
+    they keep Tk's default grey-on-grey look while the rest of the window
+    follows the user's theme.
+    """
     if _main_frame is None or not _main_frame.winfo_exists():
         return
-    if theme is not None:
-        try:
-            theme.update(_main_frame)
-        except Exception:
-            logger.exception("theme.update failed")
+    if theme is None:
+        return
+    try:
+        _theme_tree(_main_frame)
+    except Exception:
+        logger.exception("theme.update failed")
+
+
+def _theme_tree(widget: tk.Misc) -> None:
+    """Recursively theme ``widget``.
+
+    ``theme.update()`` recolours the widget it is given plus its *direct*
+    children only — our per-carrier location rows live one frame deeper, so
+    walk the nested frames ourselves.
+    """
+    theme.update(widget)
+    for child in widget.winfo_children():
+        if isinstance(child, (tk.Frame, ttk.Frame)):
+            _theme_tree(child)
 
 
 def _refresh_fc_locations() -> None:
@@ -224,6 +272,66 @@ def _refresh_fc_locations() -> None:
 
 # ── EDFCA settings tab ──────────────────────────────────────────────────────
 
+def _init_prefs_styles() -> None:
+    """Register the ttk styles and fonts our settings tab needs.
+
+    On Windows EDMC paints notebook pages white through myNotebook's ``nb.*``
+    styles; ttk widgets we create ourselves need the same treatment or they
+    come out SystemButtonFace grey against a white page.
+    """
+    global _styles_ready, _remove_btn_style, _heading_font
+    if _styles_ready:
+        return
+
+    try:
+        style = ttk.Style()
+        button_base = "TButton"
+        if sys.platform == "win32":
+            page_bg = getattr(nb, "PAGEBG", "SystemWindow")
+            page_fg = getattr(nb, "PAGEFG", "SystemWindowText")
+            style.configure("nb.TLabelframe", background=page_bg)
+            style.configure("nb.TLabelframe.Label", background=page_bg, foreground=page_fg)
+            button_base = "nb.TButton"
+
+        # Dotted prefix inherits everything else from the base button style.
+        _remove_btn_style = f"EDFCARemove.{button_base}"
+        style.configure(_remove_btn_style, foreground="red")
+
+        _heading_font = tkfont.nametofont("TkDefaultFont").copy()
+        _heading_font.configure(weight="bold")
+    except Exception:
+        logger.exception("Failed to register EDFCA styles")
+        _remove_btn_style = ""
+        _heading_font = None
+
+    _styles_ready = True
+
+
+def _page_bg() -> str:
+    """Background colour of an EDMC settings page.
+
+    Only needed for ``tk.Canvas``, which has no ttk equivalent and therefore
+    can't pick the colour up from a style.
+    """
+    if sys.platform == "win32":
+        return getattr(nb, "PAGEBG", "SystemWindow")
+    try:
+        return ttk.Style().lookup("TFrame", "background") or ""
+    except Exception:
+        return ""
+
+
+def _page_frame(master, **kw) -> ttk.Frame:
+    """A ttk.Frame that matches the settings-page background.
+
+    Used instead of ``nb.Frame`` for inner containers — nb.Frame grids a 5px
+    spacer child of its own, which would stack up once per carrier row.
+    """
+    if sys.platform == "win32":
+        return ttk.Frame(master, style="nb.TFrame", **kw)
+    return ttk.Frame(master, **kw)
+
+
 def plugin_prefs(parent, cmdr: str, is_beta: bool):
     """
     Called by EDMC to build the EDFCA settings tab.
@@ -233,31 +341,39 @@ def plugin_prefs(parent, cmdr: str, is_beta: bool):
 
     try:
         _carrier_rows = []
+        _init_prefs_styles()
 
-        FrameClass = nb.Frame if nb else tk.Frame
+        FrameClass = nb.Frame if nb else ttk.Frame
         frame = FrameClass(parent)
         frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
 
-        tk.Label(
+        _Label(
             frame, text="Fleet Carrier Announcer — Carriers",
-            font=("", 10, "bold"),
-        ).grid(row=0, column=0, sticky="w", padx=5, pady=(5, 10))
+            **({"font": _heading_font} if _heading_font else {}),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=_PADX, pady=_PADY)
 
         # Scrollable area for carrier rows
-        canvas = tk.Canvas(frame, highlightthickness=0)
+        canvas = tk.Canvas(
+            frame, highlightthickness=0, borderwidth=0, background=_page_bg(),
+        )
         scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
-        _rows_frame = tk.Frame(canvas)
+        _rows_frame = _page_frame(canvas)
 
         _rows_frame.bind(
             "<Configure>",
             lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
         )
-        canvas.create_window((0, 0), window=_rows_frame, anchor="nw")
+        window_id = canvas.create_window((0, 0), window=_rows_frame, anchor="nw")
+        # Keep the row container as wide as the canvas so entries stretch.
+        canvas.bind(
+            "<Configure>",
+            lambda e: canvas.itemconfigure(window_id, width=e.width),
+        )
         canvas.configure(yscrollcommand=scrollbar.set)
 
-        canvas.grid(row=1, column=0, sticky="nsew", padx=5)
-        scrollbar.grid(row=1, column=1, sticky="ns")
-        frame.rowconfigure(1, weight=1)
+        canvas.grid(row=1, column=0, sticky="nsew", padx=(_PADX, 0), pady=_BOXY)
+        scrollbar.grid(row=1, column=1, sticky="ns", padx=(0, _PADX), pady=_BOXY)
 
         # Load existing carriers and build a row for each
         carriers = _load_carriers()
@@ -265,11 +381,11 @@ def plugin_prefs(parent, cmdr: str, is_beta: bool):
             _add_carrier_row(carrier_data)
 
         # Add button
-        btn_frame = tk.Frame(frame)
-        btn_frame.grid(row=2, column=0, sticky="w", padx=5, pady=(10, 5))
-        tk.Button(
+        btn_frame = _page_frame(frame)
+        btn_frame.grid(row=2, column=0, sticky="w", padx=_PADX, pady=(_BOXY, _PADY))
+        _Button(
             btn_frame, text="+ Add Carrier", command=_on_add_carrier,
-        ).pack(side="left", padx=(0, 5))
+        ).pack(side="left")
 
         return frame
 
@@ -326,20 +442,21 @@ def _add_carrier_row(data: Optional[dict] = None) -> None:
         data = {}
 
     row_idx = len(_carrier_rows)
-    row_frame = tk.LabelFrame(
-        _rows_frame, text=f"Carrier {row_idx + 1}", padx=5, pady=5,
+    row_frame = ttk.LabelFrame(
+        _rows_frame, text=f"Carrier {row_idx + 1}", padding=_BOXY * 2,
+        style="nb.TLabelframe" if sys.platform == "win32" else "",
     )
-    row_frame.pack(fill="x", padx=5, pady=(0, 5))
+    row_frame.pack(fill="x", padx=(0, _PADX), pady=(0, _BOXY))
     row_frame.columnconfigure(1, weight=1)
 
     vars_dict: dict[str, tk.StringVar] = {}
     for field_row, (key, label) in enumerate(_EDITABLE_FIELDS):
-        tk.Label(row_frame, text=label + ":").grid(
-            row=field_row, column=0, sticky="w", padx=(0, 5),
+        _Label(row_frame, text=label + ":").grid(
+            row=field_row, column=0, sticky="w", padx=(0, _PADX), pady=_PADY,
         )
         var = tk.StringVar(value=data.get(key, ""))
-        tk.Entry(row_frame, textvariable=var, width=50).grid(
-            row=field_row, column=1, sticky="ew", pady=1,
+        _Entry(row_frame, textvariable=var, width=50).grid(
+            row=field_row, column=1, sticky="ew", pady=_PADY,
         )
         vars_dict[key] = var
 
@@ -352,9 +469,9 @@ def _add_carrier_row(data: Optional[dict] = None) -> None:
         rd["frame"].destroy()
 
     btn_row = len(_EDITABLE_FIELDS)
-    tk.Button(row_frame, text="✕ Remove", fg="red", command=_on_remove).grid(
-        row=btn_row, column=1, sticky="e", pady=(5, 0),
-    )
+    ttk.Button(
+        row_frame, text="✕ Remove", style=_remove_btn_style, command=_on_remove,
+    ).grid(row=btn_row, column=1, sticky="e", pady=(_BOXY * 2, 0))
 
     _carrier_rows.append(row_data)
 
