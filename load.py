@@ -13,6 +13,7 @@ The EDFCA tab in EDMC Settings allows editing carriers.json fields.
 import os
 import sys
 import threading
+import webbrowser
 from typing import Any, Optional
 
 import tkinter as tk
@@ -61,6 +62,7 @@ except ImportError:
 JOURNAL_DIR: str = config.get_str("journaldir") or config.default_journal_dir
 
 from _logger import logger
+from version import VERSION
 
 # Plugin metadata — this becomes the tab name in EDMC Settings.
 plugin_name = "EDFCA"
@@ -86,10 +88,30 @@ _styles_ready = False
 _remove_btn_style = ""
 _heading_font: Optional[tkfont.Font] = None
 
-# Main-window widgets (the "EDFCA: running" panel and per-carrier location rows).
+# Main-window widgets (the "EDFCA: Running" panel and per-carrier location rows).
 _main_frame: Optional[tk.Frame] = None
 _fc_location_rows: dict[str, dict[str, Any]] = {}
 _REFRESH_MS = 2000
+
+# Main-window grid rows: 0 is the status header, 1 the update line, carriers below.
+_CARRIER_ROW_START = 2
+
+# Icons for the update line.  Swap these if a theme's font lacks the glyph —
+# EDMC's dark/transparent themes switch to Euro Caps, and the "no check" glyph
+# is outside the BMP, which older Tcl/Tk renders as a box.
+_GLYPH_UPDATE = "⬆"
+_GLYPH_NO_CHECK = "🚫"
+
+# GitHub coordinates for the update check.
+_REPO_OWNER = "TexNevada"
+_REPO_NAME = "EDFleetCarrierAnnouncer"
+
+# Set by the update-check thread, consumed by the Tk refresh tick.
+_update_status: Optional[Any] = None
+_update_label: Optional[tk.Label] = None
+_update_var: Optional[tk.StringVar] = None
+_update_fonts: dict[str, Any] = {}
+_update_applied = False
 
 
 # ── EDMC lifecycle ───────────────────────────────────────────────────────────
@@ -97,7 +119,7 @@ _REFRESH_MS = 2000
 def plugin_start3(plugin_dir: str) -> str:
     """Called by EDMC on startup.  Returns the plugin name for display."""
     global _worker_thread
-    logger.info("Fleet Carrier Announcer starting …")
+    logger.info("Fleet Carrier Announcer v%s starting …", VERSION)
 
     _stop_event.clear()
     _worker_thread = threading.Thread(
@@ -106,6 +128,14 @@ def plugin_start3(plugin_dir: str) -> str:
         daemon=True,
     )
     _worker_thread.start()
+
+    # One check per EDMC run.  The result is picked up by the main-window
+    # refresh tick, whether or not the panel has been built yet.
+    threading.Thread(
+        target=_run_update_check,
+        name="FCAnnouncerUpdateCheck",
+        daemon=True,
+    ).start()
     return plugin_name
 
 
@@ -124,11 +154,21 @@ def plugin_app(parent: tk.Frame) -> tk.Frame:
     last known system in a readonly Entry so it can be selected and copied
     with Ctrl+C.
     """
-    global _main_frame
+    global _main_frame, _update_label, _update_var, _update_applied
     frame = tk.Frame(parent)
     frame.columnconfigure(0, weight=1)
 
-    tk.Label(frame, text="EDFCA: running").grid(row=0, column=0, sticky="w")
+    tk.Label(frame, text=f"EDFCA: Running - v{VERSION}").grid(
+        row=0, column=0, sticky="w",
+    )
+
+    # The update line is built now so EDMC's initial theme pass reaches it, then
+    # hidden — it only appears once there is something worth saying.
+    _update_var = tk.StringVar(value="")
+    _update_label = tk.Label(frame, textvariable=_update_var, anchor="w")
+    _update_label.grid(row=1, column=0, sticky="w")
+    _update_label.grid_remove()
+    _update_applied = False
 
     _main_frame = frame
     _rebuild_fc_location_rows()
@@ -149,7 +189,7 @@ def _rebuild_fc_location_rows() -> None:
 
     carriers = _load_carriers()
     multiple = len(carriers) > 1
-    for i, c in enumerate(carriers, start=1):
+    for i, c in enumerate(carriers, start=_CARRIER_ROW_START):
         cs = (c.get("callsign") or "").strip().upper()
         if not cs:
             continue
@@ -170,10 +210,7 @@ def _rebuild_fc_location_rows() -> None:
         value_label.grid(row=0, column=1, sticky="ew", padx=(5, 0))
         value_label.bind("<Button-1>", _on_location_click)
 
-        # Hover underline.  The normal font is deliberately left unset so
-        # EDMC's theme module owns it (the dark/transparent themes switch to
-        # Euro Caps); the underlined variant is derived at hover time from
-        # whatever font is live then.
+        # Hover underline — see _set_hover_underline for why no font is set here.
         value_label.bind("<Enter>", lambda e, c=cs: _set_location_hover(c, True))
         value_label.bind("<Leave>", lambda e, c=cs: _set_location_hover(c, False))
 
@@ -184,24 +221,34 @@ def _rebuild_fc_location_rows() -> None:
     _apply_theme()
 
 
-def _set_location_hover(callsign: str, hovering: bool) -> None:
-    """Underline a location label while the pointer is over it."""
-    row = _fc_location_rows.get(callsign)
-    if row is None or not row["label"].winfo_exists():
+def _set_hover_underline(label: tk.Label, store: dict, hovering: bool) -> None:
+    """Underline ``label`` while the pointer is over it.
+
+    The normal font is deliberately never set, so EDMC's theme owns it; the
+    underlined variant is derived at hover time from whatever font is live then.
+    Both are cached in ``store`` because Tk drops named fonts as soon as their
+    last Python reference is collected.
+    """
+    if not label.winfo_exists():
         return
 
-    label = row["label"]
     if hovering:
         base = label.cget("font")
         underlined = tkfont.Font(font=base)
         underlined.configure(underline=True)
-        # Keep both alive — Tk drops named fonts when their last Python
-        # reference is collected.
-        row["base_font"] = base
-        row["hover_font"] = underlined
+        store["base_font"] = base
+        store["hover_font"] = underlined
         label.configure(font=underlined)
     else:
-        label.configure(font=row.get("base_font") or "")
+        label.configure(font=store.get("base_font") or "")
+
+
+def _set_location_hover(callsign: str, hovering: bool) -> None:
+    """Underline a location label while the pointer is over it."""
+    row = _fc_location_rows.get(callsign)
+    if row is None:
+        return
+    _set_hover_underline(row["label"], row, hovering)
 
 
 def _on_location_click(event) -> None:
@@ -217,6 +264,51 @@ def _on_location_click(event) -> None:
         logger.info("Copied location to clipboard: %s", text)
     except tk.TclError:
         logger.exception("Failed to copy to clipboard")
+
+
+def _apply_update_status() -> None:
+    """Render the update-check result, once, on the Tk main thread.
+
+    Nothing is shown when the plugin is up to date — the second line only earns
+    its space when there is an update to fetch or a reason we couldn't look.
+    """
+    global _update_applied
+    status = _update_status
+    if status is None or _update_applied:
+        return
+    if _update_label is None or _update_var is None or not _update_label.winfo_exists():
+        return
+
+    _update_applied = True
+    if status.state == "up_to_date":
+        return
+
+    if status.state == "update_available":
+        _update_var.set(f"{_GLYPH_UPDATE} {status.text}")
+        _update_label.configure(cursor="hand2")
+        _update_label.bind("<Button-1>", _on_update_click)
+        _update_label.bind(
+            "<Enter>", lambda e: _set_hover_underline(_update_label, _update_fonts, True),
+        )
+        _update_label.bind(
+            "<Leave>", lambda e: _set_hover_underline(_update_label, _update_fonts, False),
+        )
+    else:
+        _update_var.set(f"{_GLYPH_NO_CHECK} {status.text}")
+
+    _update_label.grid()
+    _apply_theme()
+
+
+def _on_update_click(event) -> None:
+    """Open the release or branch page for the pending update."""
+    status = _update_status
+    if status is None or not status.url:
+        return
+    try:
+        webbrowser.open(status.url)
+    except Exception:
+        logger.exception("Failed to open %s", status.url)
 
 
 def _apply_theme() -> None:
@@ -252,10 +344,15 @@ def _theme_tree(widget: tk.Misc) -> None:
 
 def _refresh_fc_locations() -> None:
     """Poll the running registry and update each FC System field.
-    Reschedules itself on the Tk main thread."""
+
+    Also the point where the update-check result reaches the UI — this is the
+    plugin's only recurring tick on the Tk main thread.  Reschedules itself.
+    """
     if _main_frame is None or not _main_frame.winfo_exists():
         return
     try:
+        _apply_update_status()
+
         import listener
         if listener._registry is not None:
             for cs, row in _fc_location_rows.items():
@@ -266,7 +363,8 @@ def _refresh_fc_locations() -> None:
                 if row["var"].get() != loc:
                     row["var"].set(loc)
     except Exception:
-        logger.exception("Failed to refresh FC location display")
+        # Logged but never fatal — the tick must keep re-arming regardless.
+        logger.exception("Main-window refresh failed")
     _main_frame.after(_REFRESH_MS, _refresh_fc_locations)
 
 
@@ -490,4 +588,26 @@ def _run_announcer() -> None:
         main_loop(_stop_event, journal_dir=JOURNAL_DIR)
     except Exception:
         logger.exception("Fleet Carrier Announcer crashed")
+
+
+def _run_update_check() -> None:
+    """Entry point for the update-check thread.
+
+    Network I/O only — the result is left in ``_update_status`` for the Tk
+    refresh tick to render, because Tk may only be touched from its own thread.
+    """
+    global _update_status
+    try:
+        # Imported here, like listener, so that a missing ``requests`` (Linux
+        # users who skipped requirements.txt) can't stop the plugin loading.
+        import updater
+        _update_status = updater.check_for_update(
+            plugin_dir=_plugin_dir,
+            current_version=VERSION,
+            owner=_REPO_OWNER,
+            repo=_REPO_NAME,
+            user_agent=f"EDFCA/{VERSION}",
+        )
+    except Exception:
+        logger.exception("Update check thread failed")
 

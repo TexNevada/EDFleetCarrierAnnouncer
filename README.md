@@ -14,13 +14,14 @@ different Discord channels.
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
   - [1. Locate your EDMC plugins folder](#1-locate-your-edmc-plugins-folder)
-  - [2. Clone this repo into that folder](#2-clone-this-repo-into-that-folder)
+  - [2. Put this repo in that folder](#2-put-this-repo-in-that-folder)
   - [2.5 Linux extra step](#25-linux-extra-step)
   - [3. Restart EDMC](#3-restart-edmc)
   - [EDFCA uses EDMC to know where your journal files live](#edfca-uses-edmc-to-know-where-your-journal-files-live)
   - [Finding your Carrier ID](#finding-your-carrier-id)
   - [Add a carrier via the EDFCA settings tab](#add-a-carrier-via-the-edfca-settings-tab)
   - [Or edit `carriers.json` directly](#or-edit-carriersjson-directly)
+- [Versioning and updates](#versioning-and-updates)
 - [How it works](#how-it-works)
 - [Files](#files)
 - [Troubleshooting](#troubleshooting)
@@ -55,7 +56,18 @@ will not re-post events that were already announced.
 1. Open E:D Market Connector.
 2. File -> Settings -> Plugins -> **Open Plugins Folder**
 
-### 2. Clone this repo into that folder
+### 2. Put this repo in that folder
+
+Either download a zip and extract it:
+
+1. Open the [repository](https://github.com/TexNevada/EDFleetCarrierAnnouncer)
+   (switch to the `dev` branch first if you want the bleeding edge).
+2. **Code → Download ZIP**, then extract it into the plugins folder.
+3. Rename the extracted folder from `EDFleetCarrierAnnouncer-main` to
+   `EDFleetCarrierAnnouncer`.
+
+…or clone it, which is what you want on `dev` because it enables update
+checks (see [Versioning and updates](#versioning-and-updates)):
 
 ```bash
 cd /path/to/EDMarketConnector/plugins
@@ -79,7 +91,7 @@ pip install -r EDFleetCarrierAnnouncer/requirements.txt
 
 EDMC loads plugins at startup. After restarting you should see:
 
-- An **EDFCA: running** label in the main EDMC window.
+- An **EDFCA: Running - v1.0.0** label in the main EDMC window.
 - A new **EDFCA** tab in **File → Settings**.
 
 ### EDFCA uses EDMC to know where your journal files live
@@ -189,6 +201,29 @@ The plugin writes a `last_known_location` field back to this file as it
 sees your carrier in different systems — leave it alone, the plugin
 manages it.
 
+## Versioning and updates
+
+The main-window label shows the running version, e.g.
+**EDFCA: Running - v1.0.0**. There are two channels:
+
+| Branch | Version | Updates are checked against |
+|--------|---------|-----------------------------|
+| `main` | `v1.0.0` | the latest [release](https://github.com/TexNevada/EDFleetCarrierAnnouncer/releases) |
+| `dev`  | `v1.0.0-dev` | the tip of the `dev` branch |
+
+The check runs once per EDMC start. A second line appears under the status
+label only when there is something to say:
+
+- **⬆ Update available: …** — click it to open the release or commit list.
+- **🚫 Update check unavailable** — nothing could be compared. The EDMC log
+  says why. The usual reason is a `dev` build installed from a zip: without a
+  `.git` directory there is no commit id to compare against the branch, so
+  **`dev` users should install with `git clone`**. Zip installs of `main` are
+  checked normally.
+
+Nothing else is shown when you are up to date. To upgrade, `git pull` a clone,
+or re-download and replace the folder (keep your `carriers.json`).
+
 ## How it works
 
 On startup EDFCA replays the newest `Journal.*.log` to seed state for each
@@ -200,7 +235,9 @@ payloads, deduplicated against `event_cache.json`, and POSTed as Discord
 embeds to the per-carrier webhook.
 
 EDMC is purely the host process: EDFCA does **not** read or write EDMC's
-own data, send anything to EDDN, or talk to Frontier's servers.
+own data, send anything to EDDN, or talk to Frontier's servers. The only
+outbound traffic is your Discord webhooks plus one unauthenticated GitHub
+API request per start for the update check.
 
 ## Files
 
@@ -212,6 +249,8 @@ EDFleetCarrierAnnouncer/
 ├── carrier_state.py   # per-carrier state machine + registry
 ├── event_cache.py     # local dedup cache (persists across restarts)
 ├── fc_config.py       # carriers.json load/save
+├── version.py         # the running version (differs between main and dev)
+├── updater.py         # update check against GitHub
 ├── carriers.json      # YOUR carriers (gitignored — do not commit)
 └── requirements.txt
 ```
