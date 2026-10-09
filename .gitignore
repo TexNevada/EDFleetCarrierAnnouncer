@@ -219,3 +219,5 @@ __marimo__/
 
 # Local carrier config — contains Discord webhook URLs, never commit.
 carriers.json
+*.outbox.json
+.edfca-outbox-*.tmp

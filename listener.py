@@ -7,6 +7,8 @@ Fleet Carrier Announcer – journal real-time tail.
 Events are emitted through the announce() sink → Discord webhook.
 """
 
+from __future__ import annotations
+
 import time
 from datetime import datetime
 from typing import Optional
@@ -43,6 +45,7 @@ _EVENT_DESCRIPTIONS = {
     "jump_cancelled":          "❌ Carrier jump cancelled",
     "jump_unexpected_cancel":  "⚠️ Carrier jump unexpectedly cancelled",
     "jump_completed":          "✅ Carrier Jump complete",
+    "carrier_arrival":         "✅ Carrier Broadcast: New Arrival Destination",
 }
 
 _EVENT_COLORS = {
@@ -51,6 +54,7 @@ _EVENT_COLORS = {
     "jump_cancelled":          0xE74C3C,   # red
     "jump_unexpected_cancel":  0xE67E22,   # orange
     "jump_completed":          0x2ECC71,   # green
+    "carrier_arrival":         0x2ECC71,   # green
 }
 
 # Will be set in main() so announce() can persist state.
@@ -132,14 +136,8 @@ def _build_embed(payload: dict) -> dict:
     if _has_value(info.get("timestamp")):
         fields.append({"name": "Log time", "value": _to_discord_timestamp(info["timestamp"]), "inline": False})
 
-    # Estimated arrival: timestamp + 16 minutes (only for scheduled jumps)
-    if event_type == "jump_started" and _has_value(info.get("timestamp")):
-        try:
-            dt = datetime.fromisoformat(info["timestamp"].replace("Z", "+00:00"))
-            arrival_epoch = int(dt.timestamp()) + 960  # 16 minutes
-            fields.append({"name": "⏱️ Estimated Arrival Time", "value": f"<t:{arrival_epoch}:f>", "inline": False})
-        except (ValueError, OSError):
-            pass
+    if event_type == "jump_started" and _has_value(info.get("departure_time")):
+        fields.append({"name": "⏱️ Scheduled Departure", "value": _to_discord_timestamp(info["departure_time"]), "inline": False})
 
     # ── embed ────────────────────────────────────────────────────────
     embed: dict = {
@@ -155,17 +153,11 @@ def _build_embed(payload: dict) -> dict:
     return embed
 
 
-def announce(payload: dict) -> None:
-    """
-    Send a payload to the output sink.
-    1. Check the local cache — skip if this event was already announced.
-    2. Print to stdout for logging.
-    3. POST a rich embed to the carrier's Discord webhook.
-    4. Persist the updated location to carriers.json.
-    5. Record the event in the cache so it won't be re-posted on restart.
-    """
-    # ── dedup check ──────────────────────────────────────────────────
-    if _cache is not None and _cache.is_duplicate(payload):
+def announce(payload: dict, *, deliver: bool = True) -> None:
+    """Persist a live notification; accepted messages alone enter dedup."""
+    if _cache is None:
+        raise RuntimeError("A delivery cache is required before announcing")
+    if _cache.is_duplicate(payload):
         logger.debug(
             "Skipping duplicate: %s %s @ %s",
             payload.get("callsign"),
@@ -174,38 +166,53 @@ def announce(payload: dict) -> None:
         )
         return
 
-    logger.info(
-        "Announcing %s for %s @ %s",
-        payload.get("event_type"),
-        payload.get("callsign"),
-        payload.get("current_location"),
-    )
-    logger.debug("Full payload: %s", payload)
-
-    # ── persist location to carriers.json ────────────────────────────
-    if _registry is not None and payload.get("current_location"):
-        save_carriers(_registry.to_config_list())
-
-    # ── send Discord webhook ─────────────────────────────────────────
-    webhook_url = payload.get("discord_webhook")
-    if webhook_url:
-        embed = _build_embed(payload)
-        body = {"embeds": [embed]}
-
-        try:
-            resp = requests.post(webhook_url, json=body, timeout=10)
-            if resp.status_code >= 400:
-                logger.error(
-                    "Discord webhook error %d for %s: %s",
-                    resp.status_code, payload.get("callsign"), resp.text,
-                )
-        except requests.RequestException as exc:
-            logger.error("Discord webhook request failed for %s: %s",
-                         payload.get("callsign"), exc)
-
-    # ── record in cache ──────────────────────────────────────────────
-    if _cache is not None:
+    if not payload.get("discord_webhook"):
         _cache.record_and_log(payload)
+        return
+    _cache.queue(payload)
+    if deliver:
+        flush_pending()
+
+
+def _retry_after(response) -> float | None:
+    try:
+        return float(response.headers["Retry-After"])
+    except (KeyError, TypeError, ValueError):
+        try:
+            return float(response.json()["retry_after"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+
+def flush_pending() -> None:
+    """Retry persisted deliveries with backoff, preserving webhook ordering."""
+    if _cache is None:
+        return
+    if _registry is not None:
+        _cache.reconcile_schedules(_registry)
+        _cache.update_webhooks(_registry.to_config_list())
+    blocked = set()
+    for row in _cache.due():
+        payload = row["payload"]
+        webhook = payload["discord_webhook"]
+        if webhook in blocked:
+            continue
+        delay = None
+        try:
+            response = requests.post(webhook, json={"embeds": [_build_embed(payload)]},
+                                     timeout=10, allow_redirects=False)
+            if 200 <= response.status_code < 300:
+                _cache.record_and_log(payload)
+                logger.info("Announced %s for %s @ %s", payload["event_type"],
+                            payload["callsign"], payload.get("current_location"))
+                continue
+            if response.status_code == 429:
+                delay = _retry_after(response)
+            logger.error("Discord webhook error %d for %s", response.status_code, payload["callsign"])
+        except requests.RequestException as exc:
+            logger.error("Discord delivery failed for %s: %s", payload["callsign"], type(exc).__name__)
+        blocked.add(webhook)
+        _cache.defer(payload, delay=delay)
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -238,11 +245,11 @@ def main_loop(stop_event=None, journal_dir: Optional[str] = None) -> None:
     _cache = cache
 
     # 3. Seed state from the newest journal file (read-only).
-    journal_payloads, journal_raws, journal_path, journal_offset = refresh_from_journal(registry, journal_dir)
+    _, journal_raws, journal_path, journal_offset = refresh_from_journal(registry, journal_dir)
     for raw in journal_raws:
         cache.log_raw(raw)
-    for p in journal_payloads:
-        announce(p)
+    saved_config = registry.to_config_list()
+    save_carriers(saved_config)
 
     logger.debug("Carrier states after journal refresh: %s", registry)
 
@@ -261,9 +268,18 @@ def main_loop(stop_event=None, journal_dir: Optional[str] = None) -> None:
             if raw is not None and _cache is not None:
                 _cache.log_raw(raw)
             if payload is not None:
-                announce(payload)
+                announce(payload, deliver=False)
 
-        time.sleep(1)
+        current_config = registry.to_config_list()
+        if current_config != saved_config:
+            save_carriers(current_config)
+            saved_config = current_config
+        flush_pending()
+
+        if stop_event:
+            stop_event.wait(1)
+        else:
+            time.sleep(1)
 
     logger.info("Fleet Carrier Announcer stopped")
 

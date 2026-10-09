@@ -23,6 +23,7 @@ different Discord channels.
   - [Or edit `carriers.json` directly](#or-edit-carriersjson-directly)
 - [Versioning and updates](#versioning-and-updates)
 - [How it works](#how-it-works)
+- [Journal behavior review](docs/JOURNAL_BEHAVIOR_REVIEW.md)
 - [Files](#files)
 - [Troubleshooting](#troubleshooting)
 
@@ -30,14 +31,18 @@ different Discord channels.
 
 | `event_type`              | Meaning                                              |
 |---------------------------|------------------------------------------------------|
-| `jump_started`            | 🚀 Carrier jump scheduled (with destination + ETA)   |
+| `jump_started`            | 🚀 Carrier jump scheduled (destination + departure) |
 | `jump_completed`          | ✅ Carrier arrived at the destination system         |
+| `carrier_arrival`         | ✅ Carrier Broadcast: New Arrival Destination       |
 | `jump_cancelled`          | ❌ Carrier jump cancelled by the owner               |
-| `jump_unexpected_cancel`  | ⚠️ Jump cancelled without an explicit cancel event   |
-| `location_changed`        | 📍 Carrier located in a new system (silent recovery) |
+| `location_changed`        | 📍 Carrier has been located (including login reports) |
 
-Duplicate events are suppressed via a local event cache, so restarting EDMC
-will not re-post events that were already announced.
+Startup reconstructs carrier state silently; it does not backfill old
+schedules, cancellations, or arrivals. Accepted notifications retain their
+deduplication identities in `event_log.log` across restarts. Failed webhook
+deliveries are kept in `event_log.log.outbox.json` and retried with backoff;
+Discord rate-limit delays are respected. A cancellation or completion removes
+an unsent schedule for the same jump.
 
 ## Prerequisites
 
@@ -226,13 +231,52 @@ or re-download and replace the folder (keep your `carriers.json`).
 
 ## How it works
 
-On startup EDFCA replays the newest `Journal.*.log` to seed state for each
-watched carrier, then tails that file (and any newer journal that appears)
+On startup EDFCA silently replays the newest journal session, including
+available continuation parts, to seed state for each watched carrier, then
+tails that file (and any newer journal that appears)
 in a background thread. Relevant events — `CarrierJumpRequest`,
 `CarrierJump`, `CarrierJumpCancelled`, `CarrierLocation`, plus
 `Location`/`FSDJump` while docked at a tracked carrier — are turned into
-payloads, deduplicated against `event_cache.json`, and POSTed as Discord
+payloads, deduplicated against `event_log.log`, and POSTed as Discord
 embeds to the per-carrier webhook.
+
+After `Location` or another gameplay event establishes that the player is
+already in game, a changed `CarrierLocation` produces **Carrier Broadcast:
+New Arrival Destination**. It uses the same fields, green color, and thumbnail
+as **Carrier Jump complete**. EDDI documents this report as occurring shortly
+before arrival, so the broadcast announces the destination without claiming
+that the jump has finished. It also works when another operator schedules
+the jump and no local `CarrierJumpRequest` was observed.
+
+When you are away from a tracked carrier, a matching broadcast resolves its
+pending schedule after `DepartureTime`, even if no `CarrierJump` follows.
+The system address and target body are checked when available.
+EDFCA fills in system
+details from the latest earlier matching `FSDJump` in that journal, using
+`SystemAddress` first and `StarSystem` when an address is unavailable. The
+arrival keeps its own timestamp; the player's FSD arrival body is not used
+as the carrier's orbit body. Without a matching visit, the arrival is still
+announced with the available details. When you are aboard a tracked pending
+jump, EDFCA waits for the richer `CarrierJump` event and uses **Carrier Jump
+complete**. Repeated reports of the same destination do not produce a second
+broadcast or completion.
+
+Login, shutdown, resurrection, and new-session boundaries discard uncertain
+pending schedules without announcing success or cancellation. A login
+snapshot reconciles current position. `LoadGame` alone is still startup;
+before gameplay is established, `CarrierLocation` uses **Carrier has been
+located**, including one notification per carrier at login even if its
+position is unchanged. Missing session context also uses this conservative
+label. Remaining in the origin system alone does not prove cancellation.
+If EDMC stayed running while you were offline, the login report can produce
+a located notification; if EDMC also restarts, startup updates the stored
+location silently. Intermediate offline
+jumps are not reconstructed. Continuation files retain docking/visit context,
+and unfinished journal lines are read after their terminating newline arrives.
+
+The [journal behavior and webhook review](docs/JOURNAL_BEHAVIOR_REVIEW.md)
+records the online documentation, cancellation/offline/restart scenarios,
+resolved findings, regression coverage, and remaining delivery limitations.
 
 EDMC is purely the host process: EDFCA does **not** read or write EDMC's
 own data, send anything to EDDN, or talk to Frontier's servers. The only
@@ -248,6 +292,8 @@ EDFleetCarrierAnnouncer/
 ├── journal_parser.py  # newest-journal discovery + real-time tailer
 ├── carrier_state.py   # per-carrier state machine + registry
 ├── event_cache.py     # local dedup cache (persists across restarts)
+├── event_log.log      # raw observations + accepted notification identities
+├── event_log.log.outbox.json # pending deliveries (gitignored)
 ├── fc_config.py       # carriers.json load/save
 ├── version.py         # the running version (differs between main and dev)
 ├── updater.py         # update check against GitHub
@@ -256,8 +302,8 @@ EDFleetCarrierAnnouncer/
 ```
 
 
-`destination` is only present for `jump_started`. `system_info` fields are
-optional and only included when the underlying journal event carries them.
+`destination` is present for schedules and cancellations. `system_info` fields are
+optional and come from the carrier event or a matching earlier system visit.
 
 ## Troubleshooting
 
@@ -269,5 +315,9 @@ optional and only included when the underlying journal event carries them.
   `Journal.*.log` files.
 - **Webhook posts fail** — the log will show the Discord HTTP status. 401
   means the webhook URL is wrong or revoked; 404 means it was deleted.
-- **Duplicate posts after restart** — delete `event_cache.json` if you've
-  intentionally cleared state and want a fresh replay.
+- **Missing old announcements** — startup intentionally updates carrier
+  state silently. Announcements cover newly observed events and previously
+  queued deliveries; old journal records are not backfilled.
+- **Delayed announcements** — failed requests remain in the outbox. Correct
+  the webhook in EDFCA settings; pending messages use the updated URL. A lost
+  HTTP acknowledgement can still make a retry ambiguous.
