@@ -9,7 +9,7 @@ the carrier's situation meaningfully changes:
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
@@ -54,7 +54,7 @@ class CarrierState:
     callsign: str
     name: Optional[str] = None
     carrier_id: Optional[int] = None
-    discord_webhook: Optional[str] = None
+    discord_webhook: Optional[str] = field(default=None, repr=False)
     logo_url: Optional[str] = None
     current_location: Optional[str] = None
     jumping: bool = False
@@ -349,6 +349,5 @@ class CarrierRegistry:
 
     def __repr__(self) -> str:
         return f"CarrierRegistry({list(self._carriers.values())})"
-
 
 

@@ -179,7 +179,7 @@ will do if you don't have a `CarrierStats` line handy.
    | Field           | Required          | Notes                                                                                                       |
    |-----------------|-------------------|-------------------------------------------------------------------------------------------------------------|
    | Callsign        | ✓                 | Your carrier ID, e.g. `N3M-BKZ`. Rows without a callsign are dropped when you click OK.                     |
-   | Carrier ID      | Recommended       | `CarrierID` from the journal (see [Finding your Carrier ID](#finding-your-carrier-id)) — needed for events that omit the callsign (some `CarrierJumpCancelled` etc.). |
+   | Carrier ID      | For ID-only events | `CarrierID` from the journal (see [Finding your Carrier ID](#finding-your-carrier-id)) — required for `CarrierLocation` and `CarrierJumpRequest` entries that omit the callsign. |
    | Name            | Optional          | Free-text display name.                                                                                     |
    | Discord Webhook | For announcements | Full webhook URL. If blank, the carrier is tracked silently — nothing is posted to Discord.                 |
    | Logo URL        | Optional          | Image URL — shown as the embed thumbnail.                                                                   |
@@ -214,7 +214,7 @@ The main-window label shows the running version, e.g.
 | Branch | Version | Updates are checked against |
 |--------|---------|-----------------------------|
 | `main` | `v1.0.0` | the latest [release](https://github.com/TexNevada/EDFleetCarrierAnnouncer/releases) |
-| `dev`  | `v1.0.0-dev` | the tip of the `dev` branch |
+| `dev`  | `v1.0.1-dev` | the tip of the `dev` branch |
 
 The check runs once per EDMC start. A second line appears under the status
 label only when there is something to say:
@@ -312,7 +312,20 @@ optional and come from the carrier event or a matching earlier system visit.
 - **No events announced** — check EDMC's log (**File → Settings → Plugins →
   Open Log Folder**) for `EDFCA` entries; verify the journal path under
   EDMC's Configuration tab points at a folder that actually contains
-  `Journal.*.log` files.
+  `Journal.*.log` files. Confirm both the intended callsign and numeric
+  Carrier ID in EDFCA settings: ID-only journal events cannot be matched
+  using a callsign alone. Events belonging to another carrier are ignored.
+- **Plugin reads an old journal while the game is running** — update EDFCA
+  to a build containing the mixed-filename ordering fix. Older journals use
+  `Journal.YYMMDDHHMMSS.part.log`; current journals use
+  `Journal.YYYY-MM-DDTHHMMSS.part.log`. Sorting these as plain text can select
+  an old journal indefinitely. EDFCA now compares their encoded dates and
+  part numbers for both startup and live polling.
+- **Non-English journals** — journal event names and numeric identities
+  remain language-independent. Localized government/security values are
+  display text and can appear in Discord in the game's language. A Russian
+  session is covered by regression tests; see the
+  [localized-journal investigation](docs/JOURNAL_BEHAVIOR_REVIEW.md#russian-journal-investigation-2026-10-10).
 - **Webhook posts fail** — the log will show the Discord HTTP status. 401
   means the webhook URL is wrong or revoked; 404 means it was deleted.
 - **Missing old announcements** — startup intentionally updates carrier

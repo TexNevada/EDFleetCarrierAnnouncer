@@ -19,6 +19,7 @@ import glob
 import hashlib
 import json
 import os
+from datetime import datetime
 from typing import Optional
 
 from _logger import logger
@@ -28,16 +29,38 @@ from carrier_state import CarrierRegistry, CarrierState
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def _newest_journal(journal_dir: str) -> Optional[str]:
-    """Return the full path to the newest Journal.*.log file, or None."""
-    pattern = os.path.join(journal_dir, "Journal.*.log")
-    files = glob.glob(pattern)
-    if not files:
+def _journal_order(path: str) -> Optional[tuple]:
+    """Normalize modern and legacy filename dates, independently of mtime."""
+    try:
+        stem, part, extension = os.path.basename(path).rsplit(".", 2)
+        if not stem.startswith("Journal.") or extension != "log" or int(part) < 1:
+            return None
+        stamp = stem[len("Journal."):]
+        if len(stamp) == 12 and stamp.isdigit():
+            # Legacy journals use YYMMDDHHMMSS; Elite journals began in 2016.
+            stamp = "20" + stamp
+            timestamp = datetime.strptime(stamp, "%Y%m%d%H%M%S")
+        else:
+            timestamp = datetime.strptime(stamp, "%Y-%m-%dT%H%M%S")
+        return timestamp, int(part), os.path.basename(path)
+    except ValueError:
         return None
-    # Journal names encode session time and part; touching a copied old file
-    # must not make it the active journal.
-    files.sort(reverse=True)
-    return files[0]
+
+
+def _journal_files(journal_dir: str) -> list[str]:
+    """Discover recognized journals in actual session/part order."""
+    files = []
+    for path in glob.glob(os.path.join(journal_dir, "Journal.*.log")):
+        order = _journal_order(path)
+        if order is not None:
+            files.append((order, path))
+    return [path for _, path in sorted(files)]
+
+
+def _newest_journal(journal_dir: str) -> Optional[str]:
+    """Return the newest journal by encoded date and part in either format."""
+    files = _journal_files(journal_dir)
+    return files[-1] if files else None
 
 
 def _extract_carrier_callsign(entry: dict) -> Optional[str]:
@@ -362,8 +385,8 @@ def _part(path: str) -> int:
 
 def _session_parts(path: str, journal_dir: str) -> list[str]:
     """Return available preceding parts of this session, in journal order."""
-    return sorted(p for p in glob.glob(os.path.join(journal_dir, "Journal.*.log"))
-                  if _session_key(p) == _session_key(path) and p <= path)
+    return [p for p in _journal_files(journal_dir)
+            if _session_key(p) == _session_key(path) and _part(p) <= _part(path)]
 
 
 def _complete_lines(path: str, offset: int = 0, limit: Optional[int] = None):
@@ -490,8 +513,10 @@ class JournalTailer:
                 self._history_ready = True
 
             # Drain the old file and every intervening part before switching.
-            paths = sorted(p for p in glob.glob(os.path.join(self._journal_dir, "Journal.*.log"))
-                           if self._current_path <= p <= newest)
+            current_order = _journal_order(self._current_path)
+            newest_order = _journal_order(newest)
+            paths = [p for p in _journal_files(self._journal_dir)
+                     if current_order <= _journal_order(p) <= newest_order]
             for path in paths:
                 if path != self._current_path:
                     continuation = _continues(self._current_path, path, self._history)

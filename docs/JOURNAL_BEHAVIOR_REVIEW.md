@@ -297,7 +297,7 @@ Run:
 python3 -m unittest discover -s tests -v
 ```
 
-**64 tests pass with no expected failures.** The original nine expected-failure
+**77 tests pass with no expected failures.** The original nine expected-failure
 markers have been removed. Coverage includes the review reproductions,
 startup-to-live polling, preceding continuation parts, departure/body/address
 matching, split cancellation and UTF-8 records, retry persistence, rate limits,
@@ -334,3 +334,105 @@ historical notification payloads, so events not queued while the announcer was
 running are not backfilled. Real journals would still help validate all
 squadron/interior/client-version combinations beyond the documented and
 observed sequences; missing journal observations cannot prove an outcome.
+
+## Russian journal investigation, 2026-10-10
+
+The second supplied attachment, `message.txt`, contains 3,414 valid UTF-8
+JSON journal records with `language: Russian/RU`. Event names, carrier IDs,
+station types, and system identities retain the same representation used by
+the parser. Russian `SystemGovernment_Localised` and
+`SystemSecurity_Localised` values are display fields, not matching criteria.
+
+The reported symptom is **no notifications at all**. The journal alone does
+not reproduce that symptom when the moving carrier's numeric identity is
+configured. Reading its records as live observations detects four schedules,
+two aboard completions, and two offboard destination broadcasts. Both
+completion embeds render their Russian display values successfully. A full
+startup replay intentionally produces no notifications, as with English
+journals. This validates parsing and embed construction; it does not verify
+the friend's installation, settings, or actual Discord delivery.
+
+| Carrier in this attachment | Evidence |
+| --- | --- |
+| `XFH-27F`, CarrierID `3715921920` | All four jump requests/movements belong to this fleet carrier. Aboard completions are HR 5518 at 07:32:13 UTC and HR 5307 at 08:32:11 UTC. Offboard destination reports are Praea Euq PY-Y b1-0 at 07:56:10 UTC and Skeggiko O at 09:26:10 UTC. |
+| `CCGL`, CarrierID `3715894016` | Squadron-carrier startup reports show Eta Cassiopeiae. This attachment contains no jumps for that carrier. |
+
+Two configuration-dependent results were reproduced:
+
+- Watching `XFH-27F` **without** its numeric CarrierID misses all four
+  `CarrierJumpRequest` and both offboard `CarrierLocation` broadcasts:
+  these events supply the ID but no callsign. The two aboard `CarrierJump`
+  records still produce generic located messages through `StationName`.
+  This is a partial-notification failure and is not sufficient evidence to
+  explain the friend's reported complete silence.
+- Watching only `CCGL` correctly produces no jump notifications for the
+  other carrier. Its startup reports can produce located messages only if
+  observed after the plugin's silent startup replay.
+
+No arrival report in this attachment has a preceding matching `FSDJump`
+for its destination. The two offboard broadcasts therefore lack government,
+security, faction, and Powerplay enrichment. That data absence does not
+prevent sending the broadcast. The aboard `CarrierJump` records supply
+their own system details.
+
+The initial journal-only investigation could not establish the installation's
+failure. The subsequently supplied EDMC logs and confirmed settings resolve
+that uncertainty, as described below. The localized fields themselves do
+not require a parser change.
+
+`tests/fixtures/russian_carrier_session.jsonl` keeps 27 relevant observations
+from the attachment and excludes unrelated personal/chat/inventory fields.
+Six tests in `tests/test_localized_journal.py` exercise native Unicode with
+Windows CRLF, silent startup followed by live polling, all four movements,
+Russian embed fields, absent numeric identity, separation of carrier IDs,
+missing prior destination visits, and equivalent movement detection when
+display strings are replaced with English. No real webhook is called.
+
+### Confirmed cause: legacy filenames sort after modern filenames
+
+The friend confirmed `XFH-27F`, CarrierID `3715921920`, name Parallax. The
+debug log confirms those settings were loaded correctly. The new build's
+worker starts normally, but repeatedly reports:
+
+```text
+04:38:27  Reading Journal.261001214723.01.log
+07:20:50  Reading Journal.261001214723.01.log
+07:38:33  Reading Journal.261001214723.01.log
+07:49:47  Reading Journal.261001214723.01.log
+07:50:06  Reading Journal.261001214723.01.log
+```
+
+That legacy filename encodes **2026-10-01 21:47:23**, whereas an older plugin
+build run at 07:50:48 reads `Journal.2026-10-10T073649.01.log`, reconstructs
+the expected carrier positions, and processes jump payloads. The startup
+messages and source line numbers distinguish the two implementations even
+though development builds share the same displayed version.
+
+The regression came from selecting journals by raw lexical filename order
+instead of modification time. `Journal.26...` sorts after `Journal.2026-...`
+even when it represents an earlier date. Both newest-file selection and
+the tailer's filename-range comparisons shared this bug. The new worker
+therefore keeps watching the old file while the game writes the modern one,
+explaining the missing live notifications. The EDSM connection-reset
+tracebacks belong to another plugin and do not explain this EDFCA behavior.
+
+**Fixed:** parse both `YYMMDDHHMMSS` and `YYYY-MM-DDTHHMMSS` filename dates,
+then order by actual session date and numeric part. Startup selection,
+preceding-part discovery, live switching, and draining intervening files use
+that ordering. Invalid journal names are skipped. Modification time still
+does not make a copied/touched old journal current. Existing cancellation,
+offline-boundary, and continuation rules remain in effect.
+
+Seven tests in `tests/test_journal_ordering.py` cover the exact mixed-name
+reproduction, live rotation from legacy to modern names, chronological
+intervening sessions, newer legacy files, legacy continuation, malformed
+names, and omission of webhook credentials from state debug output. The
+original startup/rotation/order reproductions fail before the fix and pass
+after it.
+
+The supplied debug log also contains webhook credentials in carrier-state
+and older-build payload dumps. They are not copied into this project note
+or fixtures. `CarrierState` now excludes its webhook from its dataclass
+representation, so the current worker's state-debug log retains useful
+position data without including the credential. Existing exposed webhook
+credentials should be regenerated and the configured routes updated.
