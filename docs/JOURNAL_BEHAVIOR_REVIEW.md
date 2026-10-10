@@ -297,7 +297,7 @@ Run:
 python3 -m unittest discover -s tests -v
 ```
 
-**77 tests pass with no expected failures.** The original nine expected-failure
+**84 tests pass with no expected failures.** The original nine expected-failure
 markers have been removed. Coverage includes the review reproductions,
 startup-to-live polling, preceding continuation parts, departure/body/address
 matching, split cancellation and UTF-8 records, retry persistence, rate limits,
@@ -436,3 +436,14 @@ or fixtures. `CarrierState` now excludes its webhook from its dataclass
 representation, so the current worker's state-debug log retains useful
 position data without including the credential. Existing exposed webhook
 credentials should be regenerated and the configured routes updated.
+
+The shared logger additionally redacts Discord webhook URLs before records
+propagate to EDMC's log handlers. The filter renders and sanitizes message
+arguments without modifying the original configuration/payload objects,
+sanitizes exception and stack text, and preserves EDMC context fields.
+It recognizes current/legacy Discord hosts, versioned API paths, relative
+webhook routes from HTTP exceptions, and JSON-escaped slashes. New log
+entries use `[REDACTED DISCORD WEBHOOK]`; it does not rewrite existing logs.
+Seven tests in `tests/test_logging_redaction.py` verify propagation to parent
+handlers, nested payloads, chained/cached exceptions, stack information,
+endpoint variants, and preservation of useful diagnostics and EDMC metadata.

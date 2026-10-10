@@ -214,7 +214,7 @@ The main-window label shows the running version, e.g.
 | Branch | Version | Updates are checked against |
 |--------|---------|-----------------------------|
 | `main` | `v1.0.0` | the latest [release](https://github.com/TexNevada/EDFleetCarrierAnnouncer/releases) |
-| `dev`  | `v1.0.1-dev` | the tip of the `dev` branch |
+| `dev`  | `v1.0.2-dev` | the tip of the `dev` branch |
 
 The check runs once per EDMC start. A second line appears under the status
 label only when there is something to say:
@@ -328,6 +328,9 @@ optional and come from the carrier event or a matching earlier system visit.
   [localized-journal investigation](docs/JOURNAL_BEHAVIOR_REVIEW.md#russian-journal-investigation-2026-10-10).
 - **Webhook posts fail** — the log will show the Discord HTTP status. 401
   means the webhook URL is wrong or revoked; 404 means it was deleted.
+  EDFCA's shared logger replaces Discord webhook URLs with
+  `[REDACTED DISCORD WEBHOOK]` before forwarding records to EDMC's logs,
+  including debug messages and exception tracebacks.
 - **Missing old announcements** — startup intentionally updates carrier
   state silently. Announcements cover newly observed events and previously
   queued deliveries; old journal records are not backfilled.
