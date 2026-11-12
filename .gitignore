@@ -221,3 +221,4 @@ __marimo__/
 carriers.json
 *.outbox.json
 .edfca-outbox-*.tmp
+*.jsonl
