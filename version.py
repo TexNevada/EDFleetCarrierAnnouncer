@@ -11,4 +11,4 @@ downloading a zip from GitHub, which carries no ``.git`` directory.  Releases on
 main are tagged ``v<VERSION>``; the update check compares against that tag.
 """
 
-VERSION = "1.0.2-dev"
+VERSION = "1.0.2"
